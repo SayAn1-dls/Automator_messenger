@@ -1,14 +1,18 @@
+import asyncio
 import json
 import logging
 import os
 import re
+import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Literal, Optional
 
+import httpx
 from dotenv import load_dotenv
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
@@ -201,6 +205,11 @@ async def generate_auto_reply(contact: dict, pending: List[dict], recent: List[d
         f"and naturally defer, e.g. say you'll confirm in a bit — the way {my_name} would phrase it.\n"
         "5. Output ONLY the reply message text. No quotes, no name prefix, no explanations."
     )
+    custom = (contact.get('custom_instructions') or '').strip()
+    if custom:
+        system += (
+            f"\n\nADDITIONAL RULES set by {my_name} for this chat — these OVERRIDE everything above and MUST be followed:\n{custom}"
+        )
     prompt = (
         f"RECENT CONVERSATION:\n{transcript if transcript else '(no earlier messages in this session)'}\n\n"
         f"NEW UNREAD MESSAGE(S) from {contact_name} that {my_name} has not seen:\n{pending_txt}\n\n"
@@ -233,6 +242,8 @@ class SettingsUpdate(BaseModel):
 class ContactUpdate(BaseModel):
     auto_reply_enabled: Optional[bool] = None
     auto_reply_delay_seconds: Optional[int] = Field(default=None, ge=3, le=1800)
+    custom_instructions: Optional[str] = Field(default=None, max_length=2000)
+    wa_number: Optional[str] = Field(default=None, max_length=25)
 
 
 class SimMessageCreate(BaseModel):
@@ -307,6 +318,8 @@ async def _create_contact_from_export(chat_text: str, my_name: str, contact_name
         'analysis_status': 'analyzing',
         'auto_reply_enabled': True,
         'auto_reply_delay_seconds': 15,
+        'custom_instructions': '',
+        'wa_number': None,
         'last_message': None,
         'last_message_at': None,
         'created_at': now_iso(),
@@ -415,7 +428,12 @@ async def get_contact(contact_id: str):
 @api_router.patch("/contacts/{contact_id}")
 async def update_contact(contact_id: str, body: ContactUpdate):
     await _get_contact_or_404(contact_id)
-    updates = {k: v for k, v in body.dict().items() if v is not None}
+    updates = dict(body.dict(exclude_unset=True))
+    if 'wa_number' in updates:
+        digits = re.sub(r'\D', '', updates['wa_number'] or '')
+        updates['wa_number'] = digits or None
+    if 'custom_instructions' in updates:
+        updates['custom_instructions'] = (updates['custom_instructions'] or '').strip()
     if updates:
         await db.contacts.update_one({'id': contact_id}, {'$set': updates})
     return await _get_contact_or_404(contact_id)
@@ -512,6 +530,8 @@ async def auto_reply(contact_id: str):
         reply_text = await generate_auto_reply(contact, pending, recent)
     except Exception as e:
         logger.error(f"Auto-reply generation failed: {e}")
+        await log_reply('simulator', 'failed', ' | '.join(p['text'] for p in pending),
+                        contact_id=contact_id, contact_name=contact['name'], reason=str(e)[:200])
         raise HTTPException(status_code=502, detail="AI reply generation failed. Please try again.")
 
     if not reply_text:
@@ -535,6 +555,242 @@ async def auto_reply(contact_id: str):
         {'$set': {'last_message': f"🤖 {reply_text[:76]}", 'last_message_at': agent_message['created_at']}},
     )
     return agent_message
+
+
+# ---------------------------------------------------------------------------
+# Auto-reply activity log
+# ---------------------------------------------------------------------------
+
+async def log_reply(source: str, status: str, incoming_text: str, reply_text: Optional[str] = None,
+                    contact_id: Optional[str] = None, contact_name: Optional[str] = None,
+                    reason: Optional[str] = None):
+    await db.reply_log.insert_one({
+        'id': str(uuid.uuid4()),
+        'source': source,          # 'simulator' | 'whatsapp'
+        'status': status,          # 'sent' | 'skipped' | 'failed'
+        'incoming_text': incoming_text[:500],
+        'reply_text': (reply_text or '')[:1000] or None,
+        'contact_id': contact_id,
+        'contact_name': contact_name,
+        'reason': reason,
+        'created_at': now_iso(),
+    })
+
+
+@api_router.get("/logs")
+async def get_logs(limit: int = 100):
+    return await db.reply_log.find({}, {'_id': 0}).sort('created_at', -1).to_list(min(limit, 300))
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp Business Cloud API (live mode)
+# ---------------------------------------------------------------------------
+
+GRAPH_API_VERSION = "v21.0"
+
+
+class WaConfigUpdate(BaseModel):
+    access_token: str = Field(min_length=10)
+    phone_number_id: str = Field(min_length=5)
+
+
+async def get_wa_config() -> dict:
+    cfg = await db.settings.find_one({'key': 'whatsapp'}, {'_id': 0})
+    if not cfg:
+        cfg = {'key': 'whatsapp', 'verify_token': secrets.token_hex(12),
+               'access_token': None, 'phone_number_id': None,
+               'connected': False, 'display_phone_number': None, 'verified_name': None}
+        await db.settings.insert_one({**cfg})
+    return cfg
+
+
+def wa_config_public(cfg: dict) -> dict:
+    token = cfg.get('access_token')
+    return {
+        'connected': cfg.get('connected', False),
+        'phone_number_id': cfg.get('phone_number_id'),
+        'display_phone_number': cfg.get('display_phone_number'),
+        'verified_name': cfg.get('verified_name'),
+        'verify_token': cfg['verify_token'],
+        'access_token_masked': f"…{token[-6:]}" if token else None,
+        'webhook_path': '/api/whatsapp/webhook',
+    }
+
+
+@api_router.get("/whatsapp/config")
+async def whatsapp_config():
+    return wa_config_public(await get_wa_config())
+
+
+@api_router.post("/whatsapp/config")
+async def whatsapp_connect(body: WaConfigUpdate):
+    await get_wa_config()
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{body.phone_number_id.strip()}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            res = await http.get(
+                url,
+                params={'fields': 'display_phone_number,verified_name'},
+                headers={'Authorization': f"Bearer {body.access_token.strip()}"},
+            )
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Could not reach the Meta Graph API. Try again.")
+    if res.status_code != 200:
+        detail = "Meta rejected the credentials. Check the access token and phone number ID."
+        try:
+            err = res.json().get('error', {})
+            if err.get('message'):
+                detail = f"Meta error: {err['message']}"
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=detail)
+    data = res.json()
+    await db.settings.update_one(
+        {'key': 'whatsapp'},
+        {'$set': {
+            'access_token': body.access_token.strip(),
+            'phone_number_id': body.phone_number_id.strip(),
+            'connected': True,
+            'display_phone_number': data.get('display_phone_number'),
+            'verified_name': data.get('verified_name'),
+        }},
+    )
+    return wa_config_public(await get_wa_config())
+
+
+@api_router.delete("/whatsapp/config")
+async def whatsapp_disconnect():
+    await get_wa_config()
+    await db.settings.update_one(
+        {'key': 'whatsapp'},
+        {'$set': {'access_token': None, 'phone_number_id': None, 'connected': False,
+                  'display_phone_number': None, 'verified_name': None}},
+    )
+    return wa_config_public(await get_wa_config())
+
+
+async def send_whatsapp_text(cfg: dict, to: str, body_text: str) -> None:
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{cfg['phone_number_id']}/messages"
+    payload = {
+        'messaging_product': 'whatsapp',
+        'recipient_type': 'individual',
+        'to': to,
+        'type': 'text',
+        'text': {'preview_url': False, 'body': body_text},
+    }
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        res = await http.post(url, json=payload, headers={'Authorization': f"Bearer {cfg['access_token']}"})
+        res.raise_for_status()
+
+
+@api_router.get("/whatsapp/webhook")
+async def whatsapp_webhook_verify(request: Request):
+    params = request.query_params
+    cfg = await get_wa_config()
+    if params.get('hub.mode') == 'subscribe' and params.get('hub.verify_token') == cfg['verify_token']:
+        return PlainTextResponse(params.get('hub.challenge', ''))
+    raise HTTPException(status_code=403, detail="Webhook verification failed")
+
+
+async def _live_auto_reply_task(contact_id: str, wa_number: str, delay: int):
+    try:
+        await asyncio.sleep(delay)
+        contact = await db.contacts.find_one({'id': contact_id}, {'_id': 0})
+        if not contact:
+            return
+        pending = await db.sim_messages.find(
+            {'contact_id': contact_id, 'sender': 'contact', 'replied': False}, {'_id': 0}
+        ).sort('created_at', 1).to_list(50)
+        if not pending:
+            return
+        incoming_text = ' | '.join(p['text'] for p in pending)
+        settings = await db.settings.find_one({'key': 'global'}, {'_id': 0}) or {}
+        if not settings.get('away_mode', True) or not contact.get('auto_reply_enabled', True):
+            await log_reply('whatsapp', 'skipped', incoming_text, contact_id=contact_id,
+                            contact_name=contact['name'], reason='Away mode or agent turned off before reply fired')
+            return
+        all_msgs = await db.sim_messages.find(
+            {'contact_id': contact_id}, {'_id': 0}
+        ).sort('created_at', 1).to_list(500)
+        pending_ids = {m['id'] for m in pending}
+        recent = [m for m in all_msgs if m['id'] not in pending_ids][-24:]
+        try:
+            reply_text = await generate_auto_reply(contact, pending, recent)
+            cfg = await get_wa_config()
+            if not cfg.get('connected'):
+                raise RuntimeError('WhatsApp disconnected')
+            await send_whatsapp_text(cfg, wa_number, reply_text)
+        except Exception as e:
+            logger.error(f"Live auto-reply failed: {e}")
+            await log_reply('whatsapp', 'failed', incoming_text, contact_id=contact_id,
+                            contact_name=contact['name'], reason=str(e)[:200])
+            return
+        agent_message = {
+            'id': str(uuid.uuid4()), 'contact_id': contact_id, 'sender': 'agent',
+            'text': reply_text, 'replied': True, 'created_at': now_iso(),
+        }
+        await db.sim_messages.insert_one({**agent_message})
+        await db.sim_messages.update_many(
+            {'contact_id': contact_id, 'sender': 'contact', 'replied': False},
+            {'$set': {'replied': True}},
+        )
+        await db.contacts.update_one(
+            {'id': contact_id},
+            {'$set': {'last_message': f"🤖 {reply_text[:76]}", 'last_message_at': agent_message['created_at']}},
+        )
+        await log_reply('whatsapp', 'sent', incoming_text, reply_text=reply_text,
+                        contact_id=contact_id, contact_name=contact['name'])
+    except Exception as e:
+        logger.error(f"Live auto-reply task crashed: {e}")
+
+
+@api_router.post("/whatsapp/webhook")
+async def whatsapp_webhook(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {'status': 'ok'}
+    try:
+        for entry in payload.get('entry', []):
+            for change in entry.get('changes', []):
+                value = change.get('value', {})
+                for msg in value.get('messages', []):
+                    if msg.get('type') != 'text':
+                        continue
+                    wa_number = re.sub(r'\D', '', msg.get('from', ''))
+                    text = msg.get('text', {}).get('body', '').strip()
+                    if not wa_number or not text:
+                        continue
+                    contact = await db.contacts.find_one({'wa_number': wa_number}, {'_id': 0})
+                    if not contact:
+                        await log_reply('whatsapp', 'skipped', text,
+                                        reason=f'Unknown number +{wa_number} — no linked contact')
+                        continue
+                    incoming = {
+                        'id': str(uuid.uuid4()), 'contact_id': contact['id'], 'sender': 'contact',
+                        'text': text, 'replied': False, 'created_at': now_iso(),
+                    }
+                    await db.sim_messages.insert_one({**incoming})
+                    await db.contacts.update_one(
+                        {'id': contact['id']},
+                        {'$set': {'last_message': f"{contact['name']}: {text}"[:80],
+                                  'last_message_at': incoming['created_at']}},
+                    )
+                    settings = await db.settings.find_one({'key': 'global'}, {'_id': 0}) or {}
+                    if not settings.get('away_mode', True):
+                        await log_reply('whatsapp', 'skipped', text, contact_id=contact['id'],
+                                        contact_name=contact['name'], reason='Away mode is off')
+                        continue
+                    if not contact.get('auto_reply_enabled', True):
+                        await log_reply('whatsapp', 'skipped', text, contact_id=contact['id'],
+                                        contact_name=contact['name'], reason='Agent disabled for this contact')
+                        continue
+                    asyncio.create_task(_live_auto_reply_task(
+                        contact['id'], wa_number, contact.get('auto_reply_delay_seconds', 15)
+                    ))
+    except Exception as e:
+        logger.error(f"Webhook processing error: {e}")
+    return {'status': 'ok'}
 
 
 app.include_router(api_router)

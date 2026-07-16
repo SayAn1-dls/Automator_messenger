@@ -1,5 +1,7 @@
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
+export const BACKEND_URL = BASE_URL;
+
 export interface StyleProfile {
   languages?: string[];
   tone?: string;
@@ -23,8 +25,32 @@ export interface Contact {
   analysis_status: "analyzing" | "done" | "failed";
   auto_reply_enabled: boolean;
   auto_reply_delay_seconds: number;
+  custom_instructions?: string;
+  wa_number?: string | null;
   last_message: string | null;
   last_message_at: string | null;
+  created_at: string;
+}
+
+export interface WaConfig {
+  connected: boolean;
+  phone_number_id: string | null;
+  display_phone_number: string | null;
+  verified_name: string | null;
+  verify_token: string;
+  access_token_masked: string | null;
+  webhook_path: string;
+}
+
+export interface ReplyLog {
+  id: string;
+  source: "simulator" | "whatsapp";
+  status: "sent" | "skipped" | "failed";
+  incoming_text: string;
+  reply_text: string | null;
+  contact_id: string | null;
+  contact_name: string | null;
+  reason: string | null;
   created_at: string;
 }
 

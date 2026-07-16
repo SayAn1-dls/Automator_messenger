@@ -8,8 +8,10 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   View,
 } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { api, Contact } from "@/src/lib/api";
@@ -30,11 +32,18 @@ export default function ContactProfileScreen() {
   const [contact, setContact] = useState<Contact | null>(null);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [instructions, setInstructions] = useState("");
+  const [waNumber, setWaNumber] = useState("");
+  const [savingRules, setSavingRules] = useState(false);
+  const [rulesSaved, setRulesSaved] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setContact(await api<Contact>(`/contacts/${id}`));
+      const c = await api<Contact>(`/contacts/${id}`);
+      setContact(c);
+      setInstructions(c.custom_instructions || "");
+      setWaNumber(c.wa_number || "");
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "Failed to load contact");
     }
@@ -58,6 +67,35 @@ export default function ContactProfileScreen() {
       setContact(updated);
     } catch {
       setContact(prev);
+    }
+  };
+
+  const rulesDirty =
+    !!contact &&
+    (instructions !== (contact.custom_instructions || "") ||
+      waNumber !== (contact.wa_number || ""));
+
+  const saveRules = async () => {
+    if (!contact) return;
+    setSavingRules(true);
+    setErrorMsg(null);
+    try {
+      const updated = await api<Contact>(`/contacts/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          custom_instructions: instructions,
+          wa_number: waNumber,
+        }),
+      });
+      setContact(updated);
+      setInstructions(updated.custom_instructions || "");
+      setWaNumber(updated.wa_number || "");
+      setRulesSaved(true);
+      setTimeout(() => setRulesSaved(false), 2500);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Failed to save rules");
+    } finally {
+      setSavingRules(false);
     }
   };
 
@@ -111,11 +149,13 @@ export default function ContactProfileScreen() {
           <ActivityIndicator color={colors.green} size="large" />
         </View>
       ) : (
-        <ScrollView
+        <KeyboardAwareScrollView
           contentContainerStyle={{
             padding: spacing.md,
             paddingBottom: insets.bottom + spacing.xl,
           }}
+          keyboardShouldPersistTaps="handled"
+          bottomOffset={24}
         >
           <View style={styles.profileTop}>
             <View style={styles.bigAvatar}>
@@ -186,6 +226,58 @@ export default function ContactProfileScreen() {
                 })}
               </ScrollView>
             </View>
+          </View>
+
+          <Text style={styles.sectionLabel}>Agent rules</Text>
+          <View style={styles.card} testID="agent-rules-card">
+            <Text style={styles.settingLabel}>Custom instructions</Text>
+            <Text style={styles.settingSub}>
+              Extra rules the agent must follow in this chat
+            </Text>
+            <TextInput
+              testID="custom-instructions-input"
+              style={styles.instructionsInput}
+              multiline
+              value={instructions}
+              onChangeText={setInstructions}
+              placeholder={
+                "e.g. Never commit to plans — say I'll confirm later. Don't share where I am."
+              }
+              placeholderTextColor={colors.textSecondary}
+              textAlignVertical="top"
+            />
+            <View style={styles.divider} />
+            <Text style={styles.settingLabel}>Linked WhatsApp number</Text>
+            <Text style={styles.settingSub}>
+              Live WhatsApp messages from this number get auto-replies (include
+              country code, digits only)
+            </Text>
+            <TextInput
+              testID="wa-number-input"
+              style={styles.waInput}
+              value={waNumber}
+              onChangeText={setWaNumber}
+              placeholder="e.g. 919876543210"
+              placeholderTextColor={colors.textSecondary}
+              keyboardType="phone-pad"
+            />
+            <Pressable
+              testID="save-agent-rules-button"
+              style={[
+                styles.saveButton,
+                !rulesDirty && !rulesSaved && styles.saveButtonDisabled,
+              ]}
+              onPress={saveRules}
+              disabled={!rulesDirty || savingRules}
+            >
+              {savingRules ? (
+                <ActivityIndicator color="#052E24" size="small" />
+              ) : (
+                <Text style={styles.saveButtonText}>
+                  {rulesSaved ? "Saved ✓" : "Save rules"}
+                </Text>
+              )}
+            </Pressable>
           </View>
 
           <Text style={styles.sectionLabel}>Learned style</Text>
@@ -272,7 +364,7 @@ export default function ContactProfileScreen() {
               {errorMsg}
             </Text>
           ) : null}
-        </ScrollView>
+        </KeyboardAwareScrollView>
       )}
     </View>
   );
@@ -394,6 +486,40 @@ const styles = StyleSheet.create({
   },
   traitValue: { color: colors.text, fontSize: 13, marginTop: 3, lineHeight: 18 },
   quirksText: { color: colors.text, fontSize: 13, lineHeight: 19, marginTop: 6 },
+  instructionsInput: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    color: colors.text,
+    fontSize: 16,
+    padding: 12,
+    minHeight: 90,
+    marginTop: spacing.sm,
+  },
+  waInput: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    color: colors.text,
+    fontSize: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    minHeight: 44,
+    marginTop: spacing.sm,
+  },
+  saveButton: {
+    backgroundColor: colors.green,
+    borderRadius: radius.pill,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    marginTop: spacing.md,
+    minHeight: 44,
+  },
+  saveButtonDisabled: { opacity: 0.4 },
+  saveButtonText: { color: "#052E24", fontSize: 14, fontWeight: "700" },
   outlineButton: {
     flexDirection: "row",
     alignItems: "center",

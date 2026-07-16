@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 2 focused testing of NEW features (WhatsApp Business Cloud API integration, custom instructions, wa_number linking, auto-reply history). Backend: 11/11 new pytest tests PASSED — GET /whatsapp/config shape+verify_token stability, POST /whatsapp/config with fake creds returns 400 with Meta error message, GET webhook verify returns plaintext challenge on correct token + 403 on wrong token, POST webhook with unknown-number payload logs skipped+'unknown number' reason, PATCH /contacts wa_number normalizes '+91 98765 43210'->'919876543210' and empty string clears to null, custom_instructions max_length=2000 (422 on >2000), exclude_unset behavior preserves custom_instructions when only auto_reply_enabled is patched, /logs sorted desc and includes whatsapp/skipped entries, and simulator auto-reply respects custom_instructions (Claude deferred plans instead of committing: 'kal confirm karta hu'). Frontend UI: home has logs-button + connect-button in header (WhatsApp icon greyed while disconnected); /connect screen renders connection-status-card ('Not connected'), copy-webhook-url + copy-verify-token rows, access-token-input + phone-number-id-input + connect-button-submit; submitting fake creds surfaces 'Meta error: Malformed access token…' in connect-error-text; /logs screen renders logs-list with WhatsApp/Simulator source badges, status rows, and both 'Skipped · Unknown number …' and 'Failed · WhatsApp disconnected' entries confirming end-to-end flow; contact/[id] agent-rules-card has custom-instructions-input (multiline) + wa-number-input + save-agent-rules-button, saving triggers 'Saved ✓' pill and values persist after full page reload (verified custom_instructions='TEST_UI_do_not_share_location' and wa_number='919876543210'); cleaned up after test. Regression: home chats-screen still loads with away-mode-switch, contact rows, badges, and FAB unaffected. Deprecated packages detected: NONE (no expo-av / expo-barcode-scanner / expo-background-fetch). Only cosmetic console warning about shadow* style props (already reported in iteration 1).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "index.tsx FAB", "issues": ["Pre-existing RN Web warning: 'shadow*' style props deprecated — migrate to boxShadow (low priority, already noted iteration 1)."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/whatsapp_features_test.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/whatsapp_features_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:428-439 PATCH /contacts correctly uses body.dict(exclude_unset=True) so partial updates never wipe untouched fields. wa_number normalized to digits-only via re.sub, empty -> None. custom_instructions .strip() applied. Solid.",
+    "server.py:597-604 get_wa_config creates a persistent verify_token via secrets.token_hex(12) on first call and reuses it thereafter — stable across restarts. Good.",
+    "server.py:686-692 webhook_verify correctly returns PlainTextResponse of hub.challenge on match, 403 otherwise. Meets Meta spec.",
+    "server.py:747-793 whatsapp_webhook always returns {status:ok} regardless of internal errors (Meta requirement to avoid retry storms). Unknown-number logs skipped with clear reason. Away-mode + agent-disabled short-circuits before scheduling the live task. Good.",
+    "server.py:695-745 _live_auto_reply_task properly raises 'WhatsApp disconnected' when cfg.connected is false and logs failed — matches the retest expectation.",
+    "server.py:208-212 custom_instructions injected as ADDITIONAL RULES that OVERRIDE base rules in the LLM system prompt — Claude respected this in the test ('kal confirm' deferral instead of 'pakka').",
+    "connect.tsx / logs.tsx / contact/[id].tsx: all use testID, StyleSheet.create, Text-wrapped strings, SafeAreaView insets, KeyboardAwareScrollView. No HTML elements. No deprecated packages.",
+    "api.ts: uses EXPO_PUBLIC_BACKEND_URL from env, surfaces JSON detail as Error.message so 400 responses display Meta's rejection reason to the user. Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/whatsapp_features_test.py (new pytest module for iteration 2 features)"
+  ],
+  "success_rate": {"backend": "100% (11/11 new + 18/18 existing)", "frontend": "100% (all iteration-2 flows verified)"},
+  "seed_data_creation": "Demo contact 'Rahul (Demo)' (id 0147c616-625a-426a-b0a6-4abd87f3690f) reused. wa_number restored to '919876543210'. custom_instructions left EMPTY after cleanup. Two 'unknown number' skipped logs and one 'WhatsApp disconnected' failed log exist in reply_log for demonstration.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All new features (WA connect + webhook, custom_instructions, wa_number linking, /logs screen, /connect screen) fully working. Verify token in DB is persistent — reads via GET /api/whatsapp/config. Log seeding for UI verification: POST /api/whatsapp/webhook with unknown-from creates a skipped log immediately; test suite already creates one. Simulator auto-reply is Claude-driven — allow 5-30s. Frontend disabled state of Pressable is not exposed as HTML disabled attribute in RN Web — verify via visible text ('Saved ✓' vs 'Save rules') rather than is_disabled().",
+  "rca_of_issue": "N/A — no bugs found in iteration 2 features."
+}

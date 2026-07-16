@@ -43,16 +43,19 @@ export default function ChatsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [demoLoading, setDemoLoading] = useState(false);
+  const [waConnected, setWaConnected] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [contactsRes, settingsRes] = await Promise.all([
+      const [contactsRes, settingsRes, waRes] = await Promise.all([
         api<Contact[]>("/contacts"),
         api<{ away_mode: boolean }>("/settings"),
+        api<{ connected: boolean }>("/whatsapp/config"),
       ]);
       setContacts(contactsRes);
       setAwayMode(settingsRes.away_mode);
+      setWaConnected(waRes.connected);
       setErrorMsg(null);
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "Failed to load chats");
@@ -164,7 +167,28 @@ export default function ChatsScreen() {
             <Text style={styles.brand}>EchoPilot</Text>
             <Text style={styles.brandSub}>Your WhatsApp AI agent</Text>
           </View>
-          <View style={styles.awayPill}>
+          <View style={styles.headerActions}>
+            <Pressable
+              testID="logs-button"
+              onPress={() => router.push("/logs")}
+              hitSlop={8}
+              style={styles.headerIcon}
+            >
+              <Ionicons name="time-outline" size={21} color={colors.textSecondary} />
+            </Pressable>
+            <Pressable
+              testID="connect-button"
+              onPress={() => router.push("/connect")}
+              hitSlop={8}
+              style={styles.headerIcon}
+            >
+              <Ionicons
+                name="logo-whatsapp"
+                size={21}
+                color={waConnected ? colors.green : colors.textSecondary}
+              />
+            </Pressable>
+            <View style={styles.awayPill}>
             <Ionicons
               name={awayMode ? "moon" : "person"}
               size={14}
@@ -182,6 +206,7 @@ export default function ChatsScreen() {
               trackColor={{ false: "#374248", true: colors.greenDark }}
               thumbColor={awayMode ? colors.green : "#8696A0"}
             />
+            </View>
           </View>
         </View>
         <View
@@ -289,6 +314,8 @@ const styles = StyleSheet.create({
   },
   brand: { color: colors.text, fontSize: 24, fontWeight: "700" },
   brandSub: { color: colors.textSecondary, fontSize: 12, marginTop: 2 },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 4 },
+  headerIcon: { padding: 6 },
   awayPill: {
     flexDirection: "row",
     alignItems: "center",
