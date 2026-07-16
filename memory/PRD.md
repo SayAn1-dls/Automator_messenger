@@ -31,12 +31,17 @@ User wants an agent that, when they are not available on WhatsApp, analyzes thei
 - Full flow tested end-to-end by testing agent: 18/18 backend tests, all frontend flows pass
 - Style learning verified (demo Hinglish chat → Hinglish auto-replies)
 
+## Implemented (Jun 2026 — Iteration 2)
+- **WhatsApp Business Cloud API (ready-to-connect)**: `/connect` screen — paste Meta Access Token + Phone Number ID (verified live against Graph API v21.0), auto-generated webhook verify token, copyable webhook URL (`/api/whatsapp/webhook`). Webhook GET verification (hub.challenge) + POST message receive. Live auto-replies only for contacts with a linked `wa_number` (per-contact delay honored, away-mode + agent toggles re-checked at fire time); unknown numbers skipped + logged. NOTE: not connected to a real Meta app yet — user must supply credentials on the Connect screen.
+- **Per-contact custom instructions**: `custom_instructions` field on contact, editable in Agent Rules card on contact profile; injected as override rules into the Claude reply prompt (verified: agent defers plans when told to).
+- **Auto-reply history log**: `reply_log` collection + `/logs` screen — every sent/skipped/failed reply from simulator and live WhatsApp with reasons.
+- Tested: 11/11 new backend tests + frontend flows pass (iteration_2 report).
+
 ## Backlog
-- P1: Real WhatsApp Business Cloud API integration (webhook receive + send)
-- P1: Multiple/group-chat imports per contact, merge history
-- P2: Per-contact custom instructions ("never commit to plans", "tell them I'm driving")
-- P2: Auto-reply log/history view + "was this reply good?" feedback to refine style
+- P2: Per-contact custom instructions ✅ done (iter 2)
+- P2: Auto-reply log/history view ✅ done (iter 2) — "was this reply good?" feedback still open
 - P2: Scheduled away windows (e.g., auto-on 11pm–7am)
+- P2: Multiple/group-chat imports per contact, merge history
 
 ## Notes
 - No auth in app (single-user MVP) — /app/memory/test_credentials.md not applicable
